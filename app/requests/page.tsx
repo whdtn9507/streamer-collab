@@ -5,126 +5,394 @@ import {
   CheckCircle2,
   Clock3,
   Inbox,
+  Loader2,
   Send,
+  Trash2,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
-type RequestStatus = "pending" | "accepted" | "rejected";
-type RequestTab = "received" | "sent";
+const supabase = createClient();
 
-type CollabRequest = {
+type RequestStatus =
+  | "pending"
+  | "accepted"
+  | "rejected";
+
+type RequestTab =
+  | "received"
+  | "sent";
+
+type RequestRow = {
   id: number;
+  requester_id: string;
+  receiver_id: string;
+  start_at: string;
+  end_at: string;
+  content: string;
+  message: string | null;
+  status: RequestStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProfileRow = {
+  id: string;
+  nickname: string;
+  platform: string;
+};
+
+type CollabRequest = RequestRow & {
   type: RequestTab;
   streamerName: string;
   platform: string;
-  date: string;
-  startTime: string;
-  endTime: string;
-  content: string;
-  message: string;
-  status: RequestStatus;
 };
-
-const initialRequests: CollabRequest[] = [
-  {
-    id: 1,
-    type: "received",
-    streamerName: "마라메",
-    platform: "치지직",
-    date: "2026.09.17",
-    startTime: "20:00",
-    endTime: "23:00",
-    content: "배틀그라운드 듀오",
-    message: "1부 배그 합방을 생각하고 있습니다. 시간 조율 가능합니다.",
-    status: "pending",
-  },
-  {
-    id: 2,
-    type: "received",
-    streamerName: "소우밍",
-    platform: "치지직",
-    date: "2026.09.20",
-    startTime: "19:00",
-    endTime: "22:00",
-    content: "종합게임 합방",
-    message: "같이 할 게임은 추후 정해도 괜찮습니다.",
-    status: "accepted",
-  },
-  {
-    id: 3,
-    type: "sent",
-    streamerName: "눈꽃하임",
-    platform: "치지직",
-    date: "2026.09.21",
-    startTime: "18:00",
-    endTime: "21:00",
-    content: "배틀그라운드",
-    message: "시간 괜찮으시면 같이 방송하고 싶습니다.",
-    status: "pending",
-  },
-  {
-    id: 4,
-    type: "sent",
-    streamerName: "김꼬롬",
-    platform: "치지직",
-    date: "2026.09.23",
-    startTime: "20:00",
-    endTime: "23:00",
-    content: "종합게임",
-    message: "편하게 합방 가능한지 확인 부탁드립니다.",
-    status: "rejected",
-  },
-];
 
 const statusConfig = {
   pending: {
     label: "승인 대기",
-    className: "bg-amber-50 text-amber-700",
+    className:
+      "bg-amber-50 text-amber-700",
   },
   accepted: {
     label: "승인",
-    className: "bg-emerald-50 text-emerald-700",
+    className:
+      "bg-emerald-50 text-emerald-700",
   },
   rejected: {
     label: "거절",
-    className: "bg-red-50 text-red-600",
+    className:
+      "bg-red-50 text-red-600",
   },
 };
 
+function formatDate(iso: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  }).format(new Date(iso));
+}
+
+function formatTime(iso: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(iso));
+}
+
 export default function RequestsPage() {
+  const router = useRouter();
+
+  const [userId, setUserId] =
+    useState<string | null>(null);
+
   const [activeTab, setActiveTab] =
     useState<RequestTab>("received");
 
   const [requests, setRequests] =
-    useState<CollabRequest[]>(initialRequests);
+    useState<CollabRequest[]>([]);
 
-  const filteredRequests = useMemo(
-    () =>
-      requests.filter(
-        (request) => request.type === activeTab
-      ),
-    [requests, activeTab]
+  const [loading, setLoading] =
+    useState(true);
+
+  const [updatingId, setUpdatingId] =
+    useState<number | null>(null);
+
+  const [errorMessage, setErrorMessage] =
+    useState<string | null>(null);
+
+  const loadRequests = useCallback(
+    async (uid: string) => {
+      setLoading(true);
+      setErrorMessage(null);
+
+      const {
+        data: requestData,
+        error: requestError,
+      } = await supabase
+        .from("collab_requests")
+        .select(
+          `
+          id,
+          requester_id,
+          receiver_id,
+          start_at,
+          end_at,
+          content,
+          message,
+          status,
+          created_at,
+          updated_at
+          `
+        )
+        .or(
+          `requester_id.eq.${uid},receiver_id.eq.${uid}`
+        )
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (requestError) {
+        setErrorMessage(
+          `신청 목록을 불러오지 못했습니다: ${requestError.message}`
+        );
+        setLoading(false);
+        return;
+      }
+
+      const rows =
+        (requestData ?? []) as RequestRow[];
+
+      const otherUserIds = [
+        ...new Set(
+          rows.map((request) =>
+            request.requester_id === uid
+              ? request.receiver_id
+              : request.requester_id
+          )
+        ),
+      ];
+
+      let profileMap =
+        new Map<string, ProfileRow>();
+
+      if (otherUserIds.length > 0) {
+        const {
+          data: profileData,
+          error: profileError,
+        } = await supabase
+          .from("profiles")
+          .select(
+            "id, nickname, platform"
+          )
+          .in("id", otherUserIds);
+
+        if (profileError) {
+          setErrorMessage(
+            `스트리머 정보를 불러오지 못했습니다: ${profileError.message}`
+          );
+          setLoading(false);
+          return;
+        }
+
+        profileMap = new Map(
+          (
+            (profileData ?? []) as ProfileRow[]
+          ).map((profile) => [
+            profile.id,
+            profile,
+          ])
+        );
+      }
+
+      const mapped: CollabRequest[] =
+        rows.map((request) => {
+          const type: RequestTab =
+            request.receiver_id === uid
+              ? "received"
+              : "sent";
+
+          const otherUserId =
+            type === "received"
+              ? request.requester_id
+              : request.receiver_id;
+
+          const profile =
+            profileMap.get(otherUserId);
+
+          return {
+            ...request,
+            type,
+            streamerName:
+              profile?.nickname ??
+              "알 수 없는 스트리머",
+            platform:
+              profile?.platform ?? "-",
+          };
+        });
+
+      setRequests(mapped);
+      setLoading(false);
+    },
+    []
   );
 
-  const pendingReceivedCount = requests.filter(
-    (request) =>
-      request.type === "received" &&
-      request.status === "pending"
-  ).length;
+  useEffect(() => {
+    const initialize = async () => {
+      const {
+        data: { user },
+        error,
+      } =
+        await supabase.auth.getUser();
 
-  const updateStatus = (
-    id: number,
-    status: RequestStatus
-  ) => {
-    setRequests((current) =>
-      current.map((request) =>
-        request.id === id
-          ? { ...request, status }
-          : request
-      )
+      if (error || !user) {
+        router.replace(
+          "/auth/login"
+        );
+        return;
+      }
+
+      setUserId(user.id);
+
+      await loadRequests(user.id);
+    };
+
+    void initialize();
+  }, [loadRequests, router]);
+
+  const filteredRequests =
+    useMemo(
+      () =>
+        requests.filter(
+          (request) =>
+            request.type === activeTab
+        ),
+      [requests, activeTab]
     );
+
+  const pendingReceivedCount =
+    requests.filter(
+      (request) =>
+        request.type ===
+          "received" &&
+        request.status === "pending"
+    ).length;
+
+  const updateStatus = async (
+    id: number,
+    status:
+      | "accepted"
+      | "rejected"
+  ) => {
+    if (!userId) return;
+
+    setUpdatingId(id);
+    setErrorMessage(null);
+
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("collab_requests")
+      .update({
+        status,
+        updated_at:
+          new Date().toISOString(),
+      })
+      .eq("id", id)
+      .eq(
+        "receiver_id",
+        userId
+      )
+      .eq("status", "pending")
+      .select("id");
+
+    if (error) {
+      setErrorMessage(
+        `상태 변경 실패: ${error.message}`
+      );
+      setUpdatingId(null);
+      return;
+    }
+
+    if (
+      !data ||
+      data.length === 0
+    ) {
+      setErrorMessage(
+        "이미 처리됐거나 변경할 수 없는 신청입니다."
+      );
+      setUpdatingId(null);
+      await loadRequests(userId);
+      return;
+    }
+
+    await loadRequests(userId);
+    setUpdatingId(null);
   };
+
+  const cancelRequest =
+    async (id: number) => {
+      if (!userId) return;
+
+      const confirmed =
+        window.confirm(
+          "보낸 합방 신청을 취소하시겠습니까?"
+        );
+
+      if (!confirmed) return;
+
+      setUpdatingId(id);
+      setErrorMessage(null);
+
+      const {
+        data,
+        error,
+      } = await supabase
+        .from(
+          "collab_requests"
+        )
+        .delete()
+        .eq("id", id)
+        .eq(
+          "requester_id",
+          userId
+        )
+        .eq(
+          "status",
+          "pending"
+        )
+        .select("id");
+
+      if (error) {
+        setErrorMessage(
+          `신청 취소 실패: ${error.message}`
+        );
+        setUpdatingId(null);
+        return;
+      }
+
+      if (
+        !data ||
+        data.length === 0
+      ) {
+        setErrorMessage(
+          "이미 처리됐거나 취소할 수 없는 신청입니다."
+        );
+        setUpdatingId(null);
+        await loadRequests(userId);
+        return;
+      }
+
+      await loadRequests(userId);
+      setUpdatingId(null);
+    };
+
+  if (loading) {
+    return (
+      <main className="flex min-h-[calc(100vh-64px)] items-center justify-center bg-slate-50">
+        <div className="flex items-center gap-3 text-sm text-slate-500">
+          <Loader2
+            size={20}
+            className="animate-spin"
+          />
+          합방 신청을 불러오는 중입니다.
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-[calc(100vh-64px)] bg-slate-50">
@@ -139,19 +407,30 @@ export default function RequestsPage() {
           </h1>
 
           <p className="mt-3 text-sm leading-6 text-slate-500">
-            받은 합방 신청을 승인하거나 거절하고,
+            받은 신청을 승인하거나 거절하고,
             내가 보낸 신청 상태도 확인할 수 있습니다.
           </p>
         </div>
       </section>
 
       <section className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
+        {errorMessage && (
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        )}
+
         <div className="flex rounded-xl border border-slate-200 bg-white p-1">
           <button
             type="button"
-            onClick={() => setActiveTab("received")}
+            onClick={() =>
+              setActiveTab(
+                "received"
+              )
+            }
             className={
-              activeTab === "received"
+              activeTab ===
+              "received"
                 ? "flex flex-1 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-3 text-sm font-semibold text-white"
                 : "flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-3 text-sm font-semibold text-slate-500 hover:bg-slate-50"
             }
@@ -159,22 +438,30 @@ export default function RequestsPage() {
             <Inbox size={17} />
             받은 신청
 
-            {pendingReceivedCount > 0 && (
+            {pendingReceivedCount >
+              0 && (
               <span
                 className={
-                  activeTab === "received"
+                  activeTab ===
+                  "received"
                     ? "rounded-full bg-white px-2 py-0.5 text-xs text-slate-950"
                     : "rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600"
                 }
               >
-                {pendingReceivedCount}
+                {
+                  pendingReceivedCount
+                }
               </span>
             )}
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab("sent")}
+            onClick={() =>
+              setActiveTab(
+                "sent"
+              )
+            }
             className={
               activeTab === "sent"
                 ? "flex flex-1 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-3 text-sm font-semibold text-white"
@@ -189,147 +476,256 @@ export default function RequestsPage() {
         <div className="mt-7">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="font-semibold text-slate-950">
-              {activeTab === "received"
+              {activeTab ===
+              "received"
                 ? "받은 합방 신청"
                 : "보낸 합방 신청"}
             </h2>
 
             <span className="text-sm text-slate-500">
-              {filteredRequests.length}건
+              {
+                filteredRequests.length
+              }
+              건
             </span>
           </div>
 
-          {filteredRequests.length > 0 ? (
+          {filteredRequests.length >
+          0 ? (
             <div className="space-y-4">
-              {filteredRequests.map((request) => {
-                const status =
-                  statusConfig[request.status];
+              {filteredRequests.map(
+                (request) => {
+                  const status =
+                    statusConfig[
+                      request.status
+                    ];
 
-                return (
-                  <article
-                    key={request.id}
-                    className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6"
-                  >
-                    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-                      <div className="flex items-center gap-4">
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-950 text-lg font-bold text-white">
-                          {request.streamerName.slice(0, 1)}
+                  const busy =
+                    updatingId ===
+                    request.id;
+
+                  return (
+                    <article
+                      key={
+                        request.id
+                      }
+                      className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6"
+                    >
+                      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+                        <div className="flex items-center gap-4">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-950 text-lg font-bold text-white">
+                            {request.streamerName.slice(
+                              0,
+                              1
+                            )}
+                          </div>
+
+                          <div>
+                            <h3 className="font-bold text-slate-950">
+                              {
+                                request.streamerName
+                              }
+                            </h3>
+
+                            <p className="mt-1 text-sm text-slate-500">
+                              {
+                                request.platform
+                              }
+                            </p>
+                          </div>
                         </div>
 
-                        <div>
-                          <h3 className="font-bold text-slate-950">
-                            {request.streamerName}
-                          </h3>
-
-                          <p className="mt-1 text-sm text-slate-500">
-                            {request.platform}
-                          </p>
-                        </div>
+                        <span
+                          className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${status.className}`}
+                        >
+                          {
+                            status.label
+                          }
+                        </span>
                       </div>
 
-                      <span
-                        className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${status.className}`}
-                      >
-                        {status.label}
-                      </span>
-                    </div>
-
-                    <div className="mt-6 grid gap-4 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
-                      <div className="flex items-start gap-3">
-                        <CalendarDays
-                          size={18}
-                          className="mt-0.5 text-slate-400"
-                        />
-
-                        <div>
-                          <p className="text-xs font-medium text-slate-400">
-                            합방 날짜
-                          </p>
-
-                          <p className="mt-1 text-sm font-semibold text-slate-800">
-                            {request.date}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-start gap-3">
-                        <Clock3
-                          size={18}
-                          className="mt-0.5 text-slate-400"
-                        />
-
-                        <div>
-                          <p className="text-xs font-medium text-slate-400">
-                            시간
-                          </p>
-
-                          <p className="mt-1 text-sm font-semibold text-slate-800">
-                            {request.startTime} ~{" "}
-                            {request.endTime}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-5">
-                      <p className="text-xs font-medium text-slate-400">
-                        합방 콘텐츠
-                      </p>
-
-                      <p className="mt-1 text-sm font-semibold text-slate-900">
-                        {request.content}
-                      </p>
-                    </div>
-
-                    <div className="mt-4">
-                      <p className="text-xs font-medium text-slate-400">
-                        메시지
-                      </p>
-
-                      <p className="mt-1 text-sm leading-6 text-slate-600">
-                        {request.message}
-                      </p>
-                    </div>
-
-                    {activeTab === "received" &&
-                      request.status === "pending" && (
-                        <div className="mt-6 flex flex-col gap-2 border-t border-slate-100 pt-5 sm:flex-row sm:justify-end">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              updateStatus(
-                                request.id,
-                                "rejected"
-                              )
+                      <div className="mt-6 grid gap-4 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
+                        <div className="flex items-start gap-3">
+                          <CalendarDays
+                            size={
+                              18
                             }
-                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 px-5 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-50"
-                          >
-                            <XCircle size={17} />
-                            거절
-                          </button>
+                            className="mt-0.5 text-slate-400"
+                          />
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              updateStatus(
-                                request.id,
-                                "accepted"
-                              )
-                            }
-                            className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-                          >
-                            <CheckCircle2 size={17} />
-                            승인
-                          </button>
+                          <div>
+                            <p className="text-xs font-medium text-slate-400">
+                              합방 날짜
+                            </p>
+
+                            <p className="mt-1 text-sm font-semibold text-slate-800">
+                              {formatDate(
+                                request.start_at
+                              )}
+                            </p>
+                          </div>
                         </div>
-                      )}
-                  </article>
-                );
-              })}
+
+                        <div className="flex items-start gap-3">
+                          <Clock3
+                            size={
+                              18
+                            }
+                            className="mt-0.5 text-slate-400"
+                          />
+
+                          <div>
+                            <p className="text-xs font-medium text-slate-400">
+                              시간
+                            </p>
+
+                            <p className="mt-1 text-sm font-semibold text-slate-800">
+                              {formatTime(
+                                request.start_at
+                              )}
+                              {" ~ "}
+                              {formatTime(
+                                request.end_at
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-5">
+                        <p className="text-xs font-medium text-slate-400">
+                          합방 콘텐츠
+                        </p>
+
+                        <p className="mt-1 text-sm font-semibold text-slate-900">
+                          {
+                            request.content
+                          }
+                        </p>
+                      </div>
+
+                      <div className="mt-4">
+                        <p className="text-xs font-medium text-slate-400">
+                          메시지
+                        </p>
+
+                        <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+                          {request.message ||
+                            "전달 메시지가 없습니다."}
+                        </p>
+                      </div>
+
+                      {activeTab ===
+                        "received" &&
+                        request.status ===
+                          "pending" && (
+                          <div className="mt-6 flex flex-col gap-2 border-t border-slate-100 pt-5 sm:flex-row sm:justify-end">
+                            <button
+                              type="button"
+                              disabled={
+                                busy
+                              }
+                              onClick={() =>
+                                void updateStatus(
+                                  request.id,
+                                  "rejected"
+                                )
+                              }
+                              className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 px-5 py-3 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                            >
+                              {busy ? (
+                                <Loader2
+                                  size={
+                                    17
+                                  }
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <XCircle
+                                  size={
+                                    17
+                                  }
+                                />
+                              )}
+                              거절
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={
+                                busy
+                              }
+                              onClick={() =>
+                                void updateStatus(
+                                  request.id,
+                                  "accepted"
+                                )
+                              }
+                              className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                            >
+                              {busy ? (
+                                <Loader2
+                                  size={
+                                    17
+                                  }
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <CheckCircle2
+                                  size={
+                                    17
+                                  }
+                                />
+                              )}
+                              승인
+                            </button>
+                          </div>
+                        )}
+
+                      {activeTab ===
+                        "sent" &&
+                        request.status ===
+                          "pending" && (
+                          <div className="mt-6 flex justify-end border-t border-slate-100 pt-5">
+                            <button
+                              type="button"
+                              disabled={
+                                busy
+                              }
+                              onClick={() =>
+                                void cancelRequest(
+                                  request.id
+                                )
+                              }
+                              className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 px-5 py-3 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                            >
+                              {busy ? (
+                                <Loader2
+                                  size={
+                                    17
+                                  }
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <Trash2
+                                  size={
+                                    17
+                                  }
+                                />
+                              )}
+                              신청 취소
+                            </button>
+                          </div>
+                        )}
+                    </article>
+                  );
+                }
+              )}
             </div>
           ) : (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center">
-              {activeTab === "received" ? (
+              {activeTab ===
+              "received" ? (
                 <Inbox
                   size={30}
                   className="mx-auto text-slate-300"
@@ -342,7 +738,8 @@ export default function RequestsPage() {
               )}
 
               <h2 className="mt-4 font-semibold text-slate-800">
-                {activeTab === "received"
+                {activeTab ===
+                "received"
                   ? "받은 합방 신청이 없습니다."
                   : "보낸 합방 신청이 없습니다."}
               </h2>
@@ -350,14 +747,13 @@ export default function RequestsPage() {
           )}
         </div>
 
-        <div className="mt-8 rounded-2xl border border-blue-100 bg-blue-50 p-5">
-          <p className="text-sm font-semibold text-blue-900">
-            현재는 UI 테스트 단계입니다.
+        <div className="mt-8 rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+          <p className="text-sm font-semibold text-emerald-900">
+            Supabase에 연결된 신청입니다.
           </p>
 
-          <p className="mt-1 text-sm leading-6 text-blue-700">
-            승인·거절 상태는 새로고침하면 초기화됩니다.
-            Supabase 연결 후 실제 신청 데이터와 연동됩니다.
+          <p className="mt-1 text-sm leading-6 text-emerald-700">
+            승인·거절·취소 상태가 실제 DB에 저장되며 새로고침해도 유지됩니다.
           </p>
         </div>
       </section>
