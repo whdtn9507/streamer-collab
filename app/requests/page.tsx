@@ -279,13 +279,17 @@ export default function RequestsPage() {
     setUpdatingId(id);
     setErrorMessage(null);
 
+    /*
+     * 1. 승인 / 거절 DB 처리
+     */
     if (status === "accepted") {
-      const { error } = await supabase.rpc(
-        "accept_collab_request",
-        {
-          p_request_id: id,
-        }
-      );
+      const { error } =
+        await supabase.rpc(
+          "accept_collab_request",
+          {
+            p_request_id: id,
+          }
+        );
 
       if (error) {
         let message =
@@ -361,6 +365,7 @@ export default function RequestsPage() {
         setErrorMessage(
           "이미 처리됐거나 변경할 수 없는 신청입니다."
         );
+
         setUpdatingId(null);
 
         await loadRequests(userId);
@@ -368,7 +373,52 @@ export default function RequestsPage() {
       }
     }
 
+    /*
+     * 2. 신청자에게 승인/거절 이메일 알림
+     *
+     * 이메일이 실패해도
+     * 승인/거절 결과 자체는 유지됩니다.
+     */
+    try {
+      const response =
+        await fetch(
+          "/api/notifications/collab-status",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              requestId: id,
+              status,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        const emailError =
+          await response
+            .json()
+            .catch(() => null);
+
+        console.error(
+          "합방 결과 이메일 알림 실패:",
+          emailError
+        );
+      }
+    } catch (error) {
+      console.error(
+        "합방 결과 이메일 요청 실패:",
+        error
+      );
+    }
+
+    /*
+     * 3. 최신 신청 상태 다시 조회
+     */
     await loadRequests(userId);
+
     setUpdatingId(null);
   };
 
@@ -809,4 +859,5 @@ export default function RequestsPage() {
     </main>
   );
 }
+
 
