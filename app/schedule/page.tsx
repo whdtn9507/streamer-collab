@@ -4,45 +4,120 @@ import {
   CalendarDays,
   CalendarPlus,
   Clock3,
+  Loader2,
   Pencil,
   Trash2,
   X,
 } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
 type Schedule = {
   id: number;
-  date: string;
-  startTime: string;
-  endTime: string;
+  user_id: string;
+  start_at: string;
+  end_at: string;
 };
 
-const initialSchedules: Schedule[] = [
-  {
-    id: 1,
-    date: "2026-09-15",
-    startTime: "20:00",
-    endTime: "23:00",
-  },
-  {
-    id: 2,
-    date: "2026-09-17",
-    startTime: "19:00",
-    endTime: "22:00",
-  },
-];
+const supabase = createClient();
+
+
+function getSeoulParts(iso: string) {
+  const formatter = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+
+  const parts = formatter.formatToParts(new Date(iso));
+
+  const get = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    time: `${get("hour")}:${get("minute")}`,
+  };
+}
+
+function formatDate(iso: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  }).format(new Date(iso));
+}
+
+function formatTime(iso: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(iso));
+}
 
 export default function SchedulePage() {
-  const [schedules, setSchedules] =
-    useState<Schedule[]>(initialSchedules);
+  const router = useRouter();
+
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const [formOpen, setFormOpen] = useState(false);
-  const [editingId, setEditingId] =
-    useState<number | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
 
   const [date, setDate] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
+
+  const loadSchedules = useCallback(async (uid: string) => {
+    const { data, error } = await supabase
+      .from("availability")
+      .select("id, user_id, start_at, end_at")
+      .eq("user_id", uid)
+      .order("start_at", { ascending: true });
+
+    if (error) {
+      setErrorMessage(`일정을 불러오지 못했습니다: ${error.message}`);
+      return;
+    }
+
+    setSchedules(data ?? []);
+  }, []);
+
+  useEffect(() => {
+    const initialize = async () => {
+      setLoading(true);
+      setErrorMessage(null);
+
+      const {
+        data: { user },
+        error,
+      } = await supabase.auth.getUser();
+
+      if (error || !user) {
+        router.replace("/auth/login");
+        return;
+      }
+
+      setUserId(user.id);
+      await loadSchedules(user.id);
+      setLoading(false);
+    };
+
+    void initialize();
+  }, [loadSchedules, router]);
 
   const resetForm = () => {
     setDate("");
@@ -50,88 +125,131 @@ export default function SchedulePage() {
     setEndTime("");
     setEditingId(null);
     setFormOpen(false);
+    setErrorMessage(null);
   };
 
   const openCreateForm = () => {
-    setDate("");
-    setStartTime("");
-    setEndTime("");
-    setEditingId(null);
+    resetForm();
     setFormOpen(true);
   };
 
   const openEditForm = (schedule: Schedule) => {
-    setDate(schedule.date);
-    setStartTime(schedule.startTime);
-    setEndTime(schedule.endTime);
+    const start = getSeoulParts(schedule.start_at);
+    const end = getSeoulParts(schedule.end_at);
+
+    setDate(start.date);
+    setStartTime(start.time);
+    setEndTime(end.time);
     setEditingId(schedule.id);
     setFormOpen(true);
+    setErrorMessage(null);
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const buildDateRange = () => {
+    const start = new Date(`${date}T${startTime}:00+09:00`);
+    let end = new Date(`${date}T${endTime}:00+09:00`);
+
+    if (end <= start) {
+      end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    }
+
+    return {
+      startAt: start.toISOString(),
+      endAt: end.toISOString(),
+    };
+  };
+
+  const handleSubmit = async (
+    event: FormEvent<HTMLFormElement>
+  ) => {
     event.preventDefault();
 
-    if (!date || !startTime || !endTime) {
-      alert("날짜와 시간을 모두 입력해주세요.");
+    if (!userId) {
+      setErrorMessage("로그인 정보를 확인할 수 없습니다.");
       return;
     }
 
-    if (startTime >= endTime) {
-      alert("종료 시간은 시작 시간보다 늦어야 합니다.");
+    if (!date || !startTime || !endTime) {
+      setErrorMessage("날짜와 시간을 모두 입력해주세요.");
       return;
     }
+
+    setSaving(true);
+    setErrorMessage(null);
+
+    const { startAt, endAt } = buildDateRange();
 
     if (editingId !== null) {
-      setSchedules((current) =>
-        current.map((schedule) =>
-          schedule.id === editingId
-            ? {
-                ...schedule,
-                date,
-                startTime,
-                endTime,
-              }
-            : schedule
-        )
-      );
-    } else {
-      const newSchedule: Schedule = {
-        id: Date.now(),
-        date,
-        startTime,
-        endTime,
-      };
+      const { error } = await supabase
+        .from("availability")
+        .update({
+          start_at: startAt,
+          end_at: endAt,
+        })
+        .eq("id", editingId)
+        .eq("user_id", userId);
 
-      setSchedules((current) =>
-        [...current, newSchedule].sort((a, b) =>
-          `${a.date}${a.startTime}`.localeCompare(
-            `${b.date}${b.startTime}`
-          )
-        )
-      );
+      if (error) {
+        setErrorMessage(`수정 실패: ${error.message}`);
+        setSaving(false);
+        return;
+      }
+    } else {
+      const { error } = await supabase
+        .from("availability")
+        .insert({
+          user_id: userId,
+          start_at: startAt,
+          end_at: endAt,
+        });
+
+      if (error) {
+        setErrorMessage(`등록 실패: ${error.message}`);
+        setSaving(false);
+        return;
+      }
     }
 
+    await loadSchedules(userId);
+    setSaving(false);
     resetForm();
   };
 
-  const handleDelete = (id: number) => {
+  const handleDelete = async (id: number) => {
+    if (!userId) return;
+
     const confirmed = window.confirm(
       "이 합방 가능 일정을 삭제하시겠습니까?"
     );
 
-    if (!confirmed) {
+    if (!confirmed) return;
+
+    setErrorMessage(null);
+
+    const { error } = await supabase
+      .from("availability")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      setErrorMessage(`삭제 실패: ${error.message}`);
       return;
     }
 
-    setSchedules((current) =>
-      current.filter((schedule) => schedule.id !== id)
-    );
+    await loadSchedules(userId);
   };
 
-  const formatDate = (value: string) => {
-    const [year, month, day] = value.split("-");
-    return `${year}.${month}.${day}`;
-  };
+  if (loading) {
+    return (
+      <main className="flex min-h-[calc(100vh-64px)] items-center justify-center bg-slate-50">
+        <div className="flex items-center gap-3 text-sm text-slate-500">
+          <Loader2 className="animate-spin" size={20} />
+          일정을 불러오는 중입니다.
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-[calc(100vh-64px)] bg-slate-50">
@@ -148,8 +266,7 @@ export default function SchedulePage() {
               </h1>
 
               <p className="mt-3 text-sm leading-6 text-slate-500">
-                다른 스트리머에게 공개할 합방 가능한 날짜와
-                시간을 등록합니다.
+                다른 스트리머에게 공개할 합방 가능한 날짜와 시간을 등록합니다.
               </p>
             </div>
 
@@ -166,6 +283,12 @@ export default function SchedulePage() {
       </section>
 
       <section className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
+        {errorMessage && (
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        )}
+
         {formOpen && (
           <form
             onSubmit={handleSubmit}
@@ -190,14 +313,14 @@ export default function SchedulePage() {
                 type="button"
                 onClick={resetForm}
                 aria-label="닫기"
-                className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100"
+                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"
               >
                 <X size={20} />
               </button>
             </div>
 
             <div className="mt-6 grid gap-5 sm:grid-cols-3">
-              <div className="sm:col-span-1">
+              <div>
                 <label
                   htmlFor="schedule-date"
                   className="text-sm font-semibold text-slate-700"
@@ -209,9 +332,7 @@ export default function SchedulePage() {
                   id="schedule-date"
                   type="date"
                   value={date}
-                  onChange={(event) =>
-                    setDate(event.target.value)
-                  }
+                  onChange={(event) => setDate(event.target.value)}
                   required
                   className="mt-2 h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm outline-none focus:border-slate-950"
                 />
@@ -258,19 +379,29 @@ export default function SchedulePage() {
               </div>
             </div>
 
+            <p className="mt-3 text-xs text-slate-400">
+              종료 시간이 시작 시간보다 빠르면 다음 날 종료로 저장됩니다.
+            </p>
+
             <div className="mt-7 flex justify-end gap-3">
               <button
                 type="button"
                 onClick={resetForm}
-                className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                disabled={saving}
+                className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700"
               >
                 취소
               </button>
 
               <button
                 type="submit"
-                className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+                disabled={saving}
+                className="inline-flex min-w-28 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white disabled:bg-slate-400"
               >
+                {saving && (
+                  <Loader2 size={16} className="animate-spin" />
+                )}
+
                 {editingId !== null ? "수정 완료" : "일정 등록"}
               </button>
             </div>
@@ -304,12 +435,14 @@ export default function SchedulePage() {
 
                   <div>
                     <p className="font-semibold text-slate-950">
-                      {formatDate(schedule.date)}
+                      {formatDate(schedule.start_at)}
                     </p>
 
                     <div className="mt-1 flex items-center gap-2 text-sm text-slate-500">
                       <Clock3 size={15} />
-                      {schedule.startTime} ~ {schedule.endTime}
+                      {formatTime(schedule.start_at)}
+                      {" ~ "}
+                      {formatTime(schedule.end_at)}
                     </div>
                   </div>
                 </div>
@@ -318,7 +451,7 @@ export default function SchedulePage() {
                   <button
                     type="button"
                     onClick={() => openEditForm(schedule)}
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50 sm:flex-none"
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 sm:flex-none"
                   >
                     <Pencil size={15} />
                     수정
@@ -326,10 +459,8 @@ export default function SchedulePage() {
 
                   <button
                     type="button"
-                    onClick={() =>
-                      handleDelete(schedule.id)
-                    }
-                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 px-4 py-2.5 text-sm font-medium text-red-600 transition hover:bg-red-50 sm:flex-none"
+                    onClick={() => void handleDelete(schedule.id)}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 sm:flex-none"
                   >
                     <Trash2 size={15} />
                     삭제
@@ -350,8 +481,7 @@ export default function SchedulePage() {
             </h2>
 
             <p className="mt-2 text-sm text-slate-500">
-              가능한 날짜를 등록하면 다른 스트리머가
-              확인하고 합방을 신청할 수 있습니다.
+              가능한 날짜를 등록하면 다른 스트리머가 확인하고 합방을 신청할 수 있습니다.
             </p>
 
             <button
@@ -364,17 +494,17 @@ export default function SchedulePage() {
           </div>
         )}
 
-        <div className="mt-8 rounded-2xl border border-blue-100 bg-blue-50 p-5">
-          <p className="text-sm font-semibold text-blue-900">
-            현재는 UI 테스트 단계입니다.
+        <div className="mt-8 rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+          <p className="text-sm font-semibold text-emerald-900">
+            Supabase에 연결된 일정입니다.
           </p>
 
-          <p className="mt-1 text-sm leading-6 text-blue-700">
-            새로고침하면 등록한 일정이 초기화됩니다.
-            Supabase 연결 후에는 실제 계정별 일정으로 저장됩니다.
+          <p className="mt-1 text-sm leading-6 text-emerald-700">
+            등록·수정·삭제한 내용은 계정별로 저장되며 새로고침해도 유지됩니다.
           </p>
         </div>
       </section>
     </main>
   );
 }
+
