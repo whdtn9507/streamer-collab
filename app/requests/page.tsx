@@ -272,51 +272,100 @@ export default function RequestsPage() {
 
   const updateStatus = async (
     id: number,
-    status:
-      | "accepted"
-      | "rejected"
+    status: "accepted" | "rejected"
   ) => {
     if (!userId) return;
 
     setUpdatingId(id);
     setErrorMessage(null);
 
-    const {
-      data,
-      error,
-    } = await supabase
-      .from("collab_requests")
-      .update({
-        status,
-        updated_at:
-          new Date().toISOString(),
-      })
-      .eq("id", id)
-      .eq(
-        "receiver_id",
-        userId
-      )
-      .eq("status", "pending")
-      .select("id");
-
-    if (error) {
-      setErrorMessage(
-        `상태 변경 실패: ${error.message}`
+    if (status === "accepted") {
+      const { error } = await supabase.rpc(
+        "accept_collab_request",
+        {
+          p_request_id: id,
+        }
       );
-      setUpdatingId(null);
-      return;
-    }
 
-    if (
-      !data ||
-      data.length === 0
-    ) {
-      setErrorMessage(
-        "이미 처리됐거나 변경할 수 없는 신청입니다."
-      );
-      setUpdatingId(null);
-      await loadRequests(userId);
-      return;
+      if (error) {
+        let message =
+          `승인 실패: ${error.message}`;
+
+        if (
+          error.message.includes(
+            "receiver_already_booked"
+          )
+        ) {
+          message =
+            "이미 같은 시간에 확정된 합방이 있습니다.";
+        }
+
+        if (
+          error.message.includes(
+            "requester_already_booked"
+          )
+        ) {
+          message =
+            "신청한 스트리머가 이미 같은 시간에 다른 합방이 확정되어 있습니다.";
+        }
+
+        if (
+          error.message.includes(
+            "already_processed"
+          )
+        ) {
+          message =
+            "이미 처리된 합방 신청입니다.";
+        }
+
+        setErrorMessage(message);
+        setUpdatingId(null);
+
+        await loadRequests(userId);
+        return;
+      }
+    } else {
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("collab_requests")
+        .update({
+          status: "rejected",
+          updated_at:
+            new Date().toISOString(),
+        })
+        .eq("id", id)
+        .eq(
+          "receiver_id",
+          userId
+        )
+        .eq(
+          "status",
+          "pending"
+        )
+        .select("id");
+
+      if (error) {
+        setErrorMessage(
+          `거절 실패: ${error.message}`
+        );
+        setUpdatingId(null);
+        return;
+      }
+
+      if (
+        !data ||
+        data.length === 0
+      ) {
+        setErrorMessage(
+          "이미 처리됐거나 변경할 수 없는 신청입니다."
+        );
+        setUpdatingId(null);
+
+        await loadRequests(userId);
+        return;
+      }
     }
 
     await loadRequests(userId);
@@ -760,3 +809,4 @@ export default function RequestsPage() {
     </main>
   );
 }
+
